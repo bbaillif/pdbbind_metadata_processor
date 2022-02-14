@@ -14,7 +14,7 @@ class PDBIDNotInPDBBindException(Exception) :
         super().__init__(message)
 
 
-class PDBBindDataProcessor() :
+class PDBBindMetadataProcessor() :
     """Object to handle PDBBind metadata
     :param root: directory where PDBBind data are located
     :type root: str
