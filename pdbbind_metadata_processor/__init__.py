@@ -1,0 +1,1 @@
+from .pdbbind_metadata_processor import PDBBindMetadataProcessor
