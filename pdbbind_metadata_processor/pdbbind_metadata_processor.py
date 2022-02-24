@@ -30,7 +30,7 @@ class PDBBindMetadataProcessor() :
                                         'refined-set/')#
         self.general_available_structures = os.listdir(self.general_dir_path)
         self.refined_available_structures = os.listdir(self.refined_dir_path)
-        self.all_available_structures = (self.general_available_structures
+        self.available_structures = (self.general_available_structures
                                          + self.refined_available_structures)
         #self.chembl_targets_df = pd.read_csv('chembl_targets.csv', sep=';')
         
@@ -227,7 +227,7 @@ class PDBBindMetadataProcessor() :
         topN_ligand_counts = ligand_counts[:n_ligands]
         for ligand_name in topN_ligand_counts.index :
             pl_lig = self.pl_all[self.pl_all['ligand name'] == ligand_name]
-            pl_lig = pl_lig[pl_lig['PDB code'].isin(self.all_available_structures)]
+            pl_lig = pl_lig[pl_lig['PDB code'].isin(self.available_structures)]
 
             # Make sure we have enough data for given ligand
             if len(pl_lig) > 10 : 
@@ -248,15 +248,19 @@ class PDBBindMetadataProcessor() :
         return (train_set, test_set)
     
     
-    def get_pdb_id_pathes(self, pdb_id) :
+    def get_pdb_id_pathes(self, pdb_id, ligand_format='sdf') :
         """Give the path to the protein pdb and ligand sdf files for a
         given pdb_id if present in PDBbind
         
         :param pdb_id: Input PDB ID
         :type pdb_id: str
+        :param ligand_format: Format of the ligand to return (sdf or mol2)
+        :type ligand_format: str
         :return: Tuple with the protein path and the ligand path
         :rtype: tuple(str, str)
         """
+        
+        assert ligand_format in ['sdf', 'mol2'], 'Ligand format is sdf or mol2'
         
         if pdb_id in self.general_available_structures :
             correct_dir_path = self.general_dir_path
@@ -270,6 +274,6 @@ class PDBBindMetadataProcessor() :
                                     f'{pdb_id}_protein.pdb')
         ligand_path = os.path.join(correct_dir_path, 
                                     pdb_id, 
-                                    f'{pdb_id}_ligand.sdf')
+                                    f'{pdb_id}_ligand.{ligand_format}')
             
         return protein_path, ligand_path
