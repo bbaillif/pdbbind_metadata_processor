@@ -1,6 +1,13 @@
 import os
 import pandas as pd
+import urllib.request
 from collections import Counter
+from rdkit import Chem
+from tqdm import tqdm
+from Bio.PDB import PDBParser
+
+# To be able to save conformer properties
+Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
 class PDBIDNotInPDBBindException(Exception) :
     """Raised if the input PDB ID is not in PDBBind
@@ -20,18 +27,38 @@ class PDBBindMetadataProcessor() :
     :type root: str
     """
     
-    def __init__(self, root='/home/benoit/PDBBind/') :
+    def __init__(self, 
+                 root: str='/home/benoit/PDBBind/',
+                 corrected: bool=False) :
         self.root = root
+        self.corrected = corrected
+        
         self.general_dir_path = os.path.join(self.root, 
-                                        'PDBbind_v2020_other_PL',
-                                        'v2020-other-PL/')
+                                            'PDBbind_v2020_other_PL',
+                                            'v2020-other-PL/')
         self.refined_dir_path = os.path.join(self.root, 
-                                        'PDBbind_v2020_refined',
-                                        'refined-set/')#
-        self.general_available_structures = os.listdir(self.general_dir_path)
-        self.refined_available_structures = os.listdir(self.refined_dir_path)
-        self.available_structures = (self.general_available_structures
-                                         + self.refined_available_structures)
+                                            'PDBbind_v2020_refined',
+                                            'refined-set/')
+        
+        if self.corrected :
+            self.pdb_dir = os.path.join(self.root,
+                                        'new_pdbs')
+            if not os.path.exists(self.pdb_dir) :
+                os.mkdir(self.pdb_dir)
+            self.ligand_dir = os.path.join(self.root,
+                                        'new_ligands')
+            if not os.path.exists(self.ligand_dir) :
+                os.mkdir(self.ligand_dir)
+            self.available_files = os.listdir(self.ligand_dir)
+            self.available_structures = [file.split('.mol2')[0]
+                                         for file in self.available_files]
+        
+        else :
+            self.general_available_structures = os.listdir(self.general_dir_path)
+            self.refined_available_structures = os.listdir(self.refined_dir_path)
+            self.available_structures = set(self.general_available_structures
+                                            + self.refined_available_structures)
+            self.available_structures.remove('index')
         #self.chembl_targets_df = pd.read_csv('chembl_targets.csv', sep=';')
         
     def get_master_dataframe(self, remove_peptide_ligands=True) :
@@ -206,74 +233,254 @@ class PDBBindMetadataProcessor() :
         return value
 
     
-    def get_training_test_sets(self, n_ligands=50, train_ratio=0.7) :
-        """Performs a train test split per ligand based on protein which it 
-        binds. For a given ligand name, the list of protein it binds are stored,
-        reverse sorted by number of occurences, and filling first the 
-        training set and then the test set.
+    def get_training_test_sets(self, 
+                               mode='ligand',
+                               n_classes=50, 
+                               train_ratio=0.6) :
+        """Performs a train test split per ligand or protein based on the
+        complementary binder. For a given ligand/protein name, the list of 
+        protein/ligand it binds are stored, reverse sorted by number of 
+        occurences, and filling first the training set and then the test set.
         
-        :param n_ligands: Number of ligand to include in the dataset 
+        :param n_classes: Number of ligand to include in the dataset 
             (default 50)
-        :type n_ligands: int
+        :type n_classes: int
         :param train_ratio: Minimum ratio of samples in the training set
         :type train_ratio: float
         :return: Two dicts train_set and test_set, storing for each ligand key
             a list of pdb_ids
         :rtype: tuple(dict[list], dict[list])
         """
+        assert mode in ['ligand', 'protein']
+        if mode == 'ligand' :
+            class_column_name = 'ligand name'
+            binder_column_name = 'Uniprot ID'
+        elif mode == 'protein' :
+            class_column_name = 'Uniprot ID'
+            binder_column_name = 'ligand name'
+        
         train_set = {}
         test_set = {}
-        ligand_counts = self.pl_all['ligand name'].value_counts()
-        topN_ligand_counts = ligand_counts[:n_ligands]
-        for ligand_name in topN_ligand_counts.index :
-            pl_lig = self.pl_all[self.pl_all['ligand name'] == ligand_name]
-            pl_lig = pl_lig[pl_lig['PDB code'].isin(self.available_structures)]
+        pl_all = self.pl_all
+        if mode == 'protein' :
+            pl_all = pl_all[pl_all['Uniprot ID'] != '------']
+        class_counts = pl_all[class_column_name].value_counts()
+        topN_class_counts = class_counts[:n_classes]
+        for class_name in topN_class_counts.index :
+            pl_class = pl_all[pl_all[class_column_name] == class_name]
+            pl_class = pl_class[pl_class['PDB code'].isin(self.available_structures)]
 
-            # Make sure we have enough data for given ligand
-            if len(pl_lig) > 10 : 
+            # Make sure we have enough data for given class
+            if len(pl_class) > 10 : 
                 train_pdbs = []
                 test_pdbs = []
                 counter = Counter()
-                counter.update(pl_lig['protein name'].values)
+                counter.update(pl_class[binder_column_name].values)
                 if len(counter) > 1 :
-                    for prot_name, count in counter.most_common() :
-                        pdb_ids = pl_lig[pl_lig['protein name'] == prot_name]['PDB code'].values
-                        if len(train_pdbs) < len(pl_lig) * train_ratio :
+                    for binder_name, count in counter.most_common() :
+                        pdb_ids = pl_class[pl_class[binder_column_name] == binder_name]['PDB code'].values
+                        if len(train_pdbs) < len(pl_class) * train_ratio :
                             train_pdbs.extend(pdb_ids)
                         else :
                             test_pdbs.extend(pdb_ids)
-                    train_set[ligand_name] = train_pdbs
-                    test_set[ligand_name] = test_pdbs
+                    train_set[class_name] = train_pdbs
+                    test_set[class_name] = test_pdbs
                     
         return (train_set, test_set)
     
     
-    def get_pdb_id_pathes(self, pdb_id, ligand_format='sdf') :
-        """Give the path to the protein pdb and ligand sdf files for a
+    def get_pdb_id_pathes(self, 
+                          pdb_id: str, 
+                          ligand_format: str='sdf') :
+        """Give the path to the protein pdb and ligand sdf file(s) for a
         given pdb_id if present in PDBbind
         
         :param pdb_id: Input PDB ID
         :type pdb_id: str
         :param ligand_format: Format of the ligand to return (sdf or mol2)
         :type ligand_format: str
-        :return: Tuple with the protein path and the ligand path
-        :rtype: tuple(str, str)
+        :return: Tuple with the protein path and the ligand path(es)
+        :rtype: tuple(str, list[str])
         """
         
         assert ligand_format in ['sdf', 'mol2'], 'Ligand format is sdf or mol2'
         
+        if self.corrected :
+            
+            if pdb_id in self.available_structures :
+                protein_path = os.path.join(self.pdb_dir, 
+                                            f'{pdb_id}.pdb')
+                ligand_path = os.path.join(self.ligand_dir, 
+                                           f'{pdb_id}.mol2')
+            else :
+                raise PDBIDNotInPDBBindException(pdb_id)
+            
+        else :
+            if pdb_id in self.general_available_structures :
+                correct_dir_path = self.general_dir_path
+            elif pdb_id in self.refined_available_structures :
+                correct_dir_path = self.refined_dir_path
+            else :
+                raise PDBIDNotInPDBBindException(pdb_id)
+            
+            protein_path = os.path.join(correct_dir_path, 
+                                        pdb_id, 
+                                        f'{pdb_id}_protein.pdb')
+            ligand_path = os.path.join(correct_dir_path, 
+                                        pdb_id, 
+                                        f'{pdb_id}_ligand.{ligand_format}')
+            
+        ligand_pathes = [ligand_path]
+        return protein_path, ligand_pathes
+    
+    
+    def get_ligand_name(self, 
+                        pdb_id: str) :
+        master_table = self.get_master_dataframe()
+        pdb_line = master_table[master_table['PDB code'] == pdb_id]
+        ligand_name = pdb_line['ligand name'].values[0]
+        return ligand_name
+    
+    
+    def get_chains(self,
+                   pdb_id: str) :
+        protein_path, ligand_pathes = self.get_pdb_id_pathes(pdb_id)
+        pdb_parser = PDBParser()
+        structure = pdb_parser.get_structure('struct', protein_path)
+        chains = []
+        for model in structure :
+            for chain in model :
+                chains.append(chain.id)
+        return set(chains)
+    
+    def get_molecules(self, 
+                      subset='all',
+                      filter_mers=False,
+                      ligand_format='mol2') :
+        
+        assert subset in ['all', 'general', 'refined']
+        if subset == 'all' :
+            pdb_ids = self.available_structures
+        elif subset == 'general' :
+            pdb_ids = self.general_available_structures
+        elif subset == 'refined' :
+            pdb_ids = self.refined_available_structures
+        
+        if filter_mers :
+            table = self.get_master_dataframe()
+            pdb_ids = [pdb_id 
+                       for pdb_id in pdb_ids 
+                       if pdb_id in table['PDB code'].values]
+        
+        mols = []
+        for pdb_id in tqdm(pdb_ids) :
+            protein_path, ligand_pathes = self.get_pdb_id_pathes(pdb_id=pdb_id,
+                                                                 ligand_format=ligand_format)
+            ligand_path = ligand_pathes[0]
+            try :
+                with open(ligand_path, 'r') as f :
+                    mol2block = f.readlines()
+                #import pdb;pdb.set_trace()
+                mol2block = [line.replace('CL', 'Cl') for line in mol2block]
+                mol2block = [line.replace('BR', 'Br') for line in mol2block]
+                mol2block = [line.replace('AS', 'As') for line in mol2block]
+                mol2block = ''.join(mol2block)
+                mol = Chem.rdmolfiles.MolFromMol2Block(mol2block)
+                if mol is not None :
+                    rdmol = Chem.MolFromSmiles(Chem.MolToSmiles(mol))
+                    if rdmol is not None : #rdkit parsable
+                        mol.GetConformer().SetProp('PDB_ID', pdb_id)
+                        mol.GetConformer().SetProp('pdbbind_id', pdb_id)
+                        mols.append(mol)
+                    else :
+                        print(f'{pdb_id} Not RDKit parsable')
+            except Exception as e :
+                print('Impossible to read mol2 file for ' + pdb_id)
+                print(str(e))
+        return mols
+    
+    def download_all_corrected_data(self) :
+        table = self.get_master_dataframe()
+        for i, row in table.iterrows() :
+            pdb_id = row['PDB code']
+            ligand_name = row['ligand name']
+            ligand_name = ligand_name[1:-1] # remove parenthesis
+            self.download_corrected_data(pdb_id,
+                                         ligand_name)
+    
+    
+    def download_corrected_data(self, 
+                                pdb_id,
+                                ligand_name) :
+        self.download_pdb_file(pdb_id)
+        pdb_path = os.path.join(self.pdb_dir,
+                                f'{pdb_id}.pdb')
+        with open(pdb_path, 'r') as f :
+            lines = f.readlines()
+        for line in lines :
+            if line.startswith('HETATM') :
+                ligand_entry = line[17:20].strip()
+                chain_entry = line[20:22].strip()
+                res_entry = line[22:26].strip()
+                if ligand_entry == ligand_name :
+                    self.download_ligand_file(pdb_id, 
+                                            chain=chain_entry, 
+                                            res_id=res_entry)
+                    break
+
+        
+    def download_pdb_file(self, 
+                          pdb_id) :
+        pdb_path = os.path.join(self.pdb_dir,
+                                f'{pdb_id}.pdb')
+        if not os.path.exists(pdb_path) :
+            urllib.request.urlretrieve(f'http://files.rcsb.org/download/{pdb_id}.pdb', 
+                                       pdb_path)
+            
+            
+    def download_ligand_file(self,
+                             pdb_id,
+                             chain,
+                             res_id) :
+        ligand_path = os.path.join(self.ligand_dir,
+                                   f'{pdb_id}.mol2')
+        if not os.path.exists(ligand_path) :
+            url = f'https://models.rcsb.org/v1/{pdb_id}/ligand?auth_asym_id={chain}&auth_seq_id={res_id}&encoding=mol2'
+            #import pdb;pdb.set_trace()
+            urllib.request.urlretrieve(url, 
+                                       ligand_path)
+            
+            
+    def generate_complex(self,
+                         pdb_id,
+                         force_write=True) :
+        protein_path, ligand_pathes = self.get_pdb_id_pathes(pdb_id=pdb_id)
+        ligand_path = ligand_pathes[0]
+        complex_path = self.get_complex_path(pdb_id=pdb_id)
+        if not os.path.exists(complex_path) or force_write :
+            from pymol import cmd
+            cmd.set('retain_order', 1)
+            cmd.load(protein_path)
+            cmd.load(ligand_path)
+            cmd.save(complex_path)
+            cmd.delete('all')
+        
+        
+    def generate_complexes(self) :
+        for pdb_id in tqdm(self.available_structures) :
+            self.generate_complex(pdb_id=pdb_id)
+            
+            
+    def get_complex_path(self, pdb_id) :
         if pdb_id in self.general_available_structures :
             correct_dir_path = self.general_dir_path
         elif pdb_id in self.refined_available_structures :
             correct_dir_path = self.refined_dir_path
         else :
             raise PDBIDNotInPDBBindException(pdb_id)
-            
-        protein_path = os.path.join(correct_dir_path, 
+        
+        complex_path = os.path.join(correct_dir_path, 
                                     pdb_id, 
-                                    f'{pdb_id}_protein.pdb')
-        ligand_path = os.path.join(correct_dir_path, 
-                                    pdb_id, 
-                                    f'{pdb_id}_ligand.{ligand_format}')
-            
-        return protein_path, ligand_path
+                                    f'{pdb_id}_complex.pdb')
+        
+        return complex_path
