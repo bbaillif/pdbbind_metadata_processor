@@ -342,6 +342,14 @@ class PDBBindMetadataProcessor() :
         return ligand_name
     
     
+    def get_protein_name(self,
+                         uniprot_id: str) :
+        master_table = self.get_master_dataframe()
+        pdb_lines = master_table[master_table['Uniprot ID'] == uniprot_id]
+        protein_names = pdb_lines['protein name'].values
+        counter = Counter(protein_names)
+        return counter.most_common()[0][0]
+    
     def get_chains(self,
                    pdb_id: str) :
         protein_path, ligand_pathes = self.get_pdb_id_pathes(pdb_id)
